@@ -556,7 +556,7 @@
 
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
-const WORKER_URL = 'https://ashvaren-ai-proxy.mike-bc0.workers.dev';
+const WORKER_URL = 'https://ashvaren-assistant.mike-bc0.workers.dev';
 
 // ── State ───────────────────────────────────────────────────────────────────
 let recognition     = null;
@@ -726,27 +726,23 @@ Rules:
 
 // ── Call Claude via Worker ───────────────────────────────────────────────────
 async function callClaude(messages) {
-  // For now, simulate Claude until Worker is configured.
-  // Replace this block with a real fetch to WORKER_URL when ready.
-  return simulateResponse(messages[messages.length - 1].content);
-}
+  const response = await fetch(WORKER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages,
+      datetime: new Date().toLocaleString('en-GB', {
+        weekday: 'long', year: 'numeric', month: 'long',
+        day: 'numeric', hour: '2-digit', minute: '2-digit'
+      }),
+    }),
+  });
 
-// ── Simulate responses (remove once Worker is live) ──────────────────────────
-function simulateResponse(text) {
-  const t = text.toLowerCase();
-  if (t.includes('remind') || t.includes('don\'t forget')) {
-    return { type: 'reminder', title: text, datetime: null, notes: null };
+  if (!response.ok) {
+    throw new Error(`Worker returned ${response.status}`);
   }
-  if (t.includes('meeting') || t.includes('call') || t.includes('calendar')) {
-    return { type: 'calendar', title: text, datetime: 'Tomorrow at 10am', duration_mins: 60, notes: null, confirm_required: true };
-  }
-  if (t.includes('new client') || t.includes('onboard')) {
-    return { type: 'new_client', confirm_required: true, data: { name: null, contact: null, engagement_type: null }, next_question: 'What is the company name?' };
-  }
-  if (t.includes('project') || t.includes('purchase') || t.includes('buy')) {
-    return { type: 'new_project', confirm_required: true, data: { name: null, goal: null }, next_question: 'What shall we call this project?' };
-  }
-  return { type: 'note', client: null, content: text };
+
+  return await response.json();
 }
 
 // ── Handle result ────────────────────────────────────────────────────────────

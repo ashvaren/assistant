@@ -478,6 +478,31 @@
     50%       { height: 18px; }
   }
 
+  /* Sign in */
+  .sign-in-btn {
+    padding: 10px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    letter-spacing: 0.03em;
+    transition: background 0.15s;
+  }
+
+  .sign-in-btn:active { background: var(--accent-hi); }
+
+  .sign-in-note {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
   /* Transcript preview while speaking */
   .live-transcript {
     font-family: var(--mono);
@@ -550,6 +575,12 @@
       </svg>
     </button>
     <div class="record-hint" id="recordHint">Hold to speak</div>
+    <button class="sign-in-btn" id="signInBtn" onclick="signInWithGoogle()" style="display:none">
+      Sign in with Google
+    </button>
+    <div class="sign-in-note" id="signInNote" style="display:none">
+      Required to write to your tracker
+    </div>
   </div>
 
 </div>
@@ -690,38 +721,13 @@ async function processTranscript(text) {
 
 // ── Build message array for Claude ──────────────────────────────────────────
 function buildMessages(userText) {
-  const systemPrompt = `You are the executive assistant and chief of staff for Mike Warriner, founder of Ashvaren Advisory Limited, an independent advisory practice in London serving creative and IP-rich businesses.
-
-Mike's active clients include: Salt Creek, Office Test / Ultra HR, Aceae Nutra, Selka Health, PCC Governance.
-
-Your job is to listen to a voice memo, classify the intent, and return a JSON action object. Be brief and precise. Respond ONLY with valid JSON, no markdown, no preamble.
-
-Action types:
-- reminder: { type: "reminder", title: string, datetime: string|null, notes: string|null }
-- calendar: { type: "calendar", title: string, datetime: string, duration_mins: number, notes: string|null, confirm_required: true }
-- note: { type: "note", client: string|null, content: string }
-- new_client: { type: "new_client", confirm_required: true, data: { name: string|null, contact: string|null, engagement_type: string|null }, next_question: string }
-- new_project: { type: "new_project", confirm_required: true, data: { name: string|null, goal: string|null }, next_question: string }
-- deep_continue: { type: "deep_continue", next_question: string, data: object, complete: boolean, summary: string|null }
-- unknown: { type: "unknown", response: string }
-
-Rules:
-- calendar and new_client always set confirm_required: true
-- For new_client or new_project, if information is missing, set next_question to ask for it
-- Keep all strings concise
-- Today is ${new Date().toLocaleDateString('en-GB', { weekday:'long', year:'numeric', month:'long', day:'numeric' })}
-- Current time is ${new Date().toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' })}`;
-
-  const msgs = [{ role: 'user', content: userText }];
-
   if (deepMode.active && deepMode.context.length) {
     return [
       ...deepMode.context,
       { role: 'user', content: userText }
     ];
   }
-
-  return msgs;
+  return [{ role: 'user', content: userText }];
 }
 
 // ── Call Claude via Worker ───────────────────────────────────────────────────
@@ -746,55 +752,161 @@ async function callClaude(messages) {
 }
 
 // ── Handle result ────────────────────────────────────────────────────────────
-function handleResult(transcript, result) {
+async function handleResult(transcript, result) {
   setStatus('ready');
 
-  if (result.type === 'reminder') {
-    addEntry({
-      type: 'reminder',
-      transcript,
-      response: `Reminder set: "${result.title}"${result.datetime ? ' for ' + result.datetime : ''}.`,
-    });
-    triggerReminder(result);
+  if (!googleToken) {
+    addEntry({ type: 'note', transcript, response: 'Not signed in to Google. Tap Sign in to connect.' });
+    return;
+  }
 
-  } else if (result.type === 'calendar') {
-    addConfirmEntry({
-      transcript,
-      label: 'calendar',
-      message: `Add to calendar: "${result.title}" on ${result.datetime} (${result.duration_mins} min)?`,
-      onConfirm: () => triggerCalendar(result),
-    });
-
-  } else if (result.type === 'note') {
-    addEntry({
-      type: 'note',
-      transcript,
-      response: result.client
-        ? `Note logged against ${result.client}: "${result.content}"`
-        : `Note captured: "${result.content}"`,
-    });
-
-  } else if (result.type === 'new_client' || result.type === 'new_project') {
-    addEntry({
-      type: result.type === 'new_client' ? 'client' : 'note',
-      transcript,
-      response: result.type === 'new_client'
-        ? 'Starting new client setup…'
-        : 'Starting new project setup…',
-    });
-    openDeepMode(result);
-
-  } else if (result.type === 'deep_continue') {
-    if (result.complete) {
-      closeDeepMode();
-      addEntry({ type: 'client', transcript, response: result.summary || 'Flow complete.' });
-    } else {
-      updateDeepMode(result);
+  try {
+    // Load current tracker state
+    const state = await loadTrackerState();
+    if (!state) {
+      addEntry({ type: 'note', transcript, response: 'Could not load tracker state from Drive.' });
+      return;
     }
 
-  } else {
-    addEntry({ type: 'note', transcript, response: result.response || 'Got it.' });
+    if (result.type === 'reminder' || result.type === 'note') {
+      // Add as a task in the tracker
+      const engId = resolveEngagement(result.client || result.engagement, state.engagements);
+      const task  = {
+        id:         't' + Date.now(),
+        title:      result.title || result.content,
+        engagement: engId || '',
+        due:        result.due || (result.type === 'reminder' ? 'today' : 'this-week'),
+        done:       false,
+      };
+      state.tasks.push(task);
+      await saveTrackerState(state);
+
+      const engName = engId ? state.engagements.find(e => e.id === engId)?.name : null;
+      addEntry({
+        type: result.type === 'reminder' ? 'reminder' : 'note',
+        transcript,
+        response: engName
+          ? `Added to tracker under ${engName}: "${task.title}"`
+          : `Added to tracker: "${task.title}"`,
+      });
+
+    } else if (result.type === 'calendar') {
+      addConfirmEntry({
+        transcript,
+        label: 'calendar',
+        message: `Add to calendar: "${result.title}" on ${result.datetime} (${result.duration_mins} min)?`,
+        onConfirm: async () => {
+          // Add as a task with the date in the title for now
+          const task = {
+            id:         't' + Date.now(),
+            title:      `${result.title} — ${result.datetime}`,
+            engagement: '',
+            due:        'this-week',
+            done:       false,
+          };
+          state.tasks.push(task);
+          await saveTrackerState(state);
+        },
+      });
+
+    } else if (result.type === 'new_client' || result.type === 'new_project') {
+      addEntry({
+        type: result.type === 'new_client' ? 'client' : 'note',
+        transcript,
+        response: result.type === 'new_client'
+          ? 'Starting new client setup…'
+          : 'Starting new project setup…',
+      });
+      openDeepMode(result);
+
+    } else if (result.type === 'deep_continue') {
+      if (result.complete && result.engagement) {
+        // Write new engagement and tasks to tracker
+        const newEng = {
+          id:           'e' + Date.now(),
+          name:         result.engagement.name,
+          type:         result.engagement.type || 'Advisory',
+          status:       result.engagement.isProspective ? 'prospective' : 'active',
+          last:         `Engagement opened via assistant`,
+          next:         result.engagement.next || 'Draft NDA and engagement letter',
+          deadline:     '',
+          contactName:  result.engagement.contact || '',
+          contactEmail: '',
+          scope:        result.engagement.scope || '',
+          notes:        '',
+          driveFolder:  null,
+          isProspective: result.engagement.isProspective || false,
+          lastContact:  new Date().toISOString().split('T')[0],
+          history:      [],
+          feeType:      '',
+          estDays:      null,
+          fixedAmount:  null,
+          probability:  result.engagement.isProspective ? 25 : 100,
+        };
+        state.engagements.push(newEng);
+        (result.tasks || []).forEach(t => {
+          state.tasks.push({
+            id:         't' + Date.now() + Math.random(),
+            title:      t.title,
+            engagement: newEng.id,
+            due:        t.due || 'this-week',
+            done:       false,
+          });
+        });
+        await saveTrackerState(state);
+        closeDeepMode();
+        addEntry({
+          type: 'client',
+          transcript,
+          response: `${newEng.name} added to tracker with ${result.tasks?.length || 0} tasks.`,
+        });
+      } else {
+        updateDeepMode(result);
+      }
+
+    } else if (result.type === 'engagement_update') {
+      // Update an existing engagement's last/next fields
+      const eng = state.engagements.find(e =>
+        e.id === result.engagementId ||
+        e.name.toLowerCase().includes((result.engagementName || '').toLowerCase())
+      );
+      if (eng) {
+        if (result.last) eng.last = result.last;
+        if (result.next) eng.next = result.next;
+        if (result.status) eng.status = result.status;
+        if (result.historyEntry) {
+          if (!eng.history) eng.history = [];
+          eng.history.push({
+            date: new Date().toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }),
+            type: 'assistant',
+            text: result.historyEntry,
+          });
+        }
+        await saveTrackerState(state);
+        addEntry({
+          type: 'note',
+          transcript,
+          response: `${eng.name} updated in tracker.`,
+        });
+      } else {
+        addEntry({ type: 'note', transcript, response: result.response || 'Got it.' });
+      }
+
+    } else {
+      addEntry({ type: 'note', transcript, response: result.response || 'Got it.' });
+    }
+
+  } catch(err) {
+    addEntry({ type: 'note', transcript, response: `Error writing to tracker: ${err.message}` });
   }
+}
+
+// ── Resolve engagement by partial name ───────────────────────────────────────
+function resolveEngagement(nameHint, engagements) {
+  if (!nameHint || !engagements) return null;
+  const hint = nameHint.toLowerCase();
+  const match = engagements.find(e => e.name.toLowerCase().includes(hint) || hint.includes(e.name.toLowerCase().split(' ')[0]));
+  return match ? match.id : null;
 }
 
 // ── Deep mode ────────────────────────────────────────────────────────────────
@@ -910,30 +1022,186 @@ function addConfirmEntry({ transcript, label, message, onConfirm }) {
   el.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
-// ── Downstream actions ───────────────────────────────────────────────────────
-function triggerReminder(r) {
-  // iOS Shortcuts bridge — replace with your actual shortcut name
-  const name  = encodeURIComponent(r.title);
-  const url   = `shortcuts://run-shortcut?name=Add%20Reminder&input=${name}`;
-  window.location.href = url;
+// ── Google OAuth ─────────────────────────────────────────────────────────────
+const DRIVE_SCOPES  = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_FILE    = 'ashvaren-tracker-state.json';
+let googleToken     = null;
+let driveFileId     = null;
+
+function getClientId() {
+  return localStorage.getItem('ashvaren_client_id') || '';
 }
 
-function triggerCalendar(r) {
-  // Google Calendar quick-add URL as a fallback until Worker handles this
-  const text  = encodeURIComponent(r.title + ' ' + r.datetime);
-  const url   = `https://calendar.google.com/calendar/r/eventedit?text=${text}&details=${encodeURIComponent(r.notes || '')}`;
-  window.open(url, '_blank');
+function saveClientId(id) {
+  localStorage.setItem('ashvaren_client_id', id.trim());
 }
 
-// ── Init ─────────────────────────────────────────────────────────────────────
-(function init() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (SR) {
+function signInWithGoogle() {
+  const clientId = getClientId();
+  if (!clientId) {
+    promptClientId();
+    return;
+  }
+  const redirect = window.location.origin + window.location.pathname;
+  window.location.href = `https://accounts.google.com/o/oauth2/v2/auth`
+    + `?client_id=${encodeURIComponent(clientId)}`
+    + `&redirect_uri=${encodeURIComponent(redirect)}`
+    + `&response_type=token`
+    + `&scope=${encodeURIComponent(DRIVE_SCOPES)}`
+    + `&prompt=consent`;
+}
+
+function promptClientId() {
+  const existing = getClientId();
+  const id = window.prompt(
+    'Enter your Google OAuth Client ID\n(from console.cloud.google.com — same one used in the work tracker)',
+    existing
+  );
+  if (id && id.trim()) {
+    saveClientId(id.trim());
+    signInWithGoogle();
+  }
+}
+
+function handleOAuthCallback() {
+  const hash = window.location.hash;
+  if (!hash.includes('access_token')) return false;
+  const params = new URLSearchParams(hash.replace('#', '?'));
+  const token  = params.get('access_token');
+  if (token) {
+    localStorage.setItem('google_token', token);
+    googleToken = token;
+    window.location.hash = '';
+    return true;
+  }
+  return false;
+}
+
+// ── Drive helpers ─────────────────────────────────────────────────────────────
+async function driveGet(url) {
+  const res = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${googleToken}` }
+  });
+  if (res.status === 401) {
+    googleToken = null;
+    localStorage.removeItem('google_token');
+    updateAuthUI();
+    throw new Error('Google session expired. Please sign in again.');
+  }
+  return res;
+}
+
+async function ensureDriveFolder(parts) {
+  let parentId = 'root';
+  for (const name of parts) {
+    const q = `name='${name}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`;
+    const r = await driveGet(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`);
+    const d = await r.json();
+    if (d.files && d.files.length) {
+      parentId = d.files[0].id;
+    } else {
+      const c = await fetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${googleToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] })
+      });
+      const f = await c.json();
+      parentId = f.id;
+    }
+  }
+  return parentId;
+}
+
+async function loadTrackerState() {
+  const folderId = await ensureDriveFolder(['Ashvaren', 'Tracker']);
+  const q = `name='${DRIVE_FILE}' and '${folderId}' in parents and trashed=false`;
+  const r = await driveGet(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`);
+  const d = await r.json();
+  if (!d.files || !d.files.length) return null;
+  driveFileId = d.files[0].id;
+  const fr = await driveGet(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`);
+  return await fr.json();
+}
+
+async function saveTrackerState(state) {
+  if (!driveFileId) return;
+  await fetch(`https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${googleToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(state, null, 2)
+  });
+}
+
+// ── Auth UI ───────────────────────────────────────────────────────────────────
+function updateAuthUI() {
+  const signInBtn = document.getElementById('signInBtn');
+  const signInNote = document.getElementById('signInNote');
+  if (googleToken) {
+    signInBtn.style.display = 'none';
+    signInNote.style.display = 'none';
     setStatus('ready');
     recordBtn.classList.add('ready');
   } else {
+    signInBtn.style.display = 'inline-flex';
+    signInNote.style.display = 'block';
+    setStatus('');
+    recordBtn.classList.remove('ready');
+  }
+}
+
+// ── Call Claude via Worker ───────────────────────────────────────────────────
+async function callClaude(messages) {
+  const response = await fetch(WORKER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages,
+      datetime: new Date().toLocaleString('en-GB', {
+        weekday: 'long', year: 'numeric', month: 'long',
+        day: 'numeric', hour: '2-digit', minute: '2-digit'
+      }),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Worker returned ${response.status}`);
+  }
+
+  return await response.json();
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+(async function init() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
     setStatus('error');
     recordHint.textContent = 'Use Safari on iOS';
+    return;
+  }
+
+  // Handle OAuth callback
+  handleOAuthCallback();
+
+  // Restore token from storage
+  if (!googleToken) {
+    googleToken = localStorage.getItem('google_token') || null;
+  }
+
+  updateAuthUI();
+
+  // Pre-load Drive file ID so first action is fast
+  if (googleToken) {
+    try {
+      await loadTrackerState();
+    } catch(e) {
+      // Token may be stale — will surface on first action
+      googleToken = null;
+      localStorage.removeItem('google_token');
+      updateAuthUI();
+    }
   }
 })();
 </script>

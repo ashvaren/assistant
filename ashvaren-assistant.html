@@ -549,6 +549,8 @@
 </head>
 <body>
 
+<div id="debugBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:#b8864a;color:#fff;font-size:12px;padding:8px 12px;z-index:9999;line-height:1.6;word-break:break-all;white-space:pre-wrap;max-height:40vh;overflow-y:auto;"></div>
+
 <div class="app">
 
   <!-- Header -->
@@ -618,6 +620,15 @@
 // ── Config ──────────────────────────────────────────────────────────────────
 const WORKER_URL = 'https://ashvaren-assistant.mike-bc0.workers.dev';
 
+// ── Debug helper ─────────────────────────────────────────────────────────────
+function debug(msg) {
+  const banner = document.getElementById('debugBanner');
+  if (!banner) return;
+  banner.style.display = 'block';
+  banner.textContent = (banner.textContent ? banner.textContent + '\n' : '') + msg;
+  console.log('[debug]', msg);
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 let recognition     = null;
 let isRecording     = false;
@@ -673,6 +684,7 @@ function initRecognition() {
     isRecording = false;
     recordBtn.classList.remove('recording');
     waveform.classList.remove('active');
+    debug(`onend fired. finalTranscript: "${finalTranscript}"`);
     if (finalTranscript.trim()) {
       processTranscript(finalTranscript.trim());
     } else {
@@ -688,6 +700,7 @@ function initRecognition() {
     waveform.classList.remove('active');
     setStatus('ready');
     recordHint.textContent = 'Hold to speak';
+    debug(`recognition error: ${e.error}`);
     if (e.error !== 'no-speech' && e.error !== 'aborted') {
       addEntry({ type: 'note', transcript: '', response: `Mic error: ${e.error}. Check browser permissions.` });
     }
@@ -761,36 +774,43 @@ recordBtn.addEventListener('mouseleave', (e) => {
 
 // ── Process transcript ───────────────────────────────────────────────────────
 async function processTranscript(text) {
+  debug(`processTranscript called: "${text}"`);
   setStatus('thinking');
   recordBtn.classList.add('thinking');
   recordHint.textContent = 'Thinking…';
   hideFeedEmpty();
 
   try {
-    // Guard: must be signed in
     if (!googleToken) {
+      debug('No googleToken — aborting');
       addEntry({ type: 'note', transcript: text, response: 'Not signed in to Google. Tap Sign in to connect.' });
       return;
     }
 
+    debug(`googleToken present. Calling Worker…`);
     const messages = buildMessages(text);
     let result;
 
     try {
       result = await callClaude(messages);
+      debug(`Worker response: ${JSON.stringify(result)}`);
     } catch(workerErr) {
+      debug(`Worker threw: ${workerErr.message}`);
       addEntry({ type: 'note', transcript: text, response: `Worker error: ${workerErr.message}` });
       return;
     }
 
     if (!result || typeof result !== 'object') {
-      addEntry({ type: 'note', transcript: text, response: `Unexpected response from Worker: ${JSON.stringify(result)}` });
+      debug(`Bad result: ${JSON.stringify(result)}`);
+      addEntry({ type: 'note', transcript: text, response: `Unexpected response: ${JSON.stringify(result)}` });
       return;
     }
 
+    debug(`Calling handleResult with type: ${result.type}`);
     await handleResult(text, result);
 
   } catch(err) {
+    debug(`Outer catch: ${err.message}`);
     addEntry({ type: 'note', transcript: text, response: `Error: ${err.message}` });
   } finally {
     setStatus(googleToken ? 'ready' : '');

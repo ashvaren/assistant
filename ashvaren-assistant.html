@@ -551,8 +551,6 @@
 </head>
 <body>
 
-<div id="debugBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:#b8864a;color:#fff;font-size:12px;padding:8px 12px;z-index:9999;line-height:1.6;word-break:break-all;white-space:pre-wrap;max-height:40vh;overflow-y:auto;"></div>
-
 <div class="app">
 
   <!-- Header -->
@@ -622,15 +620,6 @@
 // ── Config ──────────────────────────────────────────────────────────────────
 const WORKER_URL = 'https://ashvaren-assistant.mike-bc0.workers.dev';
 
-// ── Debug helper ─────────────────────────────────────────────────────────────
-function debug(msg) {
-  const banner = document.getElementById('debugBanner');
-  if (!banner) return;
-  banner.style.display = 'block';
-  banner.textContent = (banner.textContent ? banner.textContent + '\n' : '') + msg;
-  console.log('[debug]', msg);
-}
-
 // ── State ───────────────────────────────────────────────────────────────────
 let recognition     = null;
 let isRecording     = false;
@@ -652,60 +641,62 @@ const deepInput      = document.getElementById('deepInput');
 const deepMicBtn     = document.getElementById('deepMicBtn');
 const deepClose      = document.getElementById('deepClose');
 
-// ── Speech Recognition setup ─────────────────────────────────────────────────
+// ── Speech Recognition ───────────────────────────────────────────────────────
+// Safari on iOS always fires onend after silence regardless of continuous mode.
+// We work around this by restarting automatically while isHolding is true,
+// accumulating the transcript across restarts until the button is released.
+
 function initRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
     setStatus('error');
-    addEntry({ type: 'note', transcript: '', response: 'Speech recognition is not supported in this browser. Please use Safari on iOS.' });
+    recordHint.textContent = 'Use Safari on iOS';
     return false;
   }
+
   recognition = new SR();
-  recognition.continuous      = true;
-  recognition.interimResults  = true;
-  recognition.lang            = 'en-GB';
-  recognition.maxAlternatives = 1;
+  recognition.continuous     = false; // Safari ignores true — we restart manually
+  recognition.interimResults = true;
+  recognition.lang           = 'en-GB';
 
   recognition.onstart = () => {
     isRecording = true;
     setStatus('active');
     waveform.classList.add('active');
-    recordHint.textContent = 'Listening…';
+    if (isHolding) recordHint.textContent = 'Listening…';
   };
 
   recognition.onresult = (e) => {
     let interim = '';
-    let sessionFinal = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) sessionFinal += e.results[i][0].transcript;
-      else interim += e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        finalTranscript += (finalTranscript ? ' ' : '') + e.results[i][0].transcript.trim();
+      } else {
+        interim += e.results[i][0].transcript;
+      }
     }
-    if (sessionFinal) finalTranscript += ' ' + sessionFinal;
-    liveTranscript.textContent = (finalTranscript + ' ' + interim).trim();
+    liveTranscript.textContent = (finalTranscript + (interim ? ' ' + interim : '')).trim();
   };
 
   recognition.onend = () => {
     isRecording = false;
-    recordBtn.classList.remove('finishing');
     waveform.classList.remove('active');
-    debug(`onend fired. isHolding=${isHolding} finalTranscript="${finalTranscript}"`);
 
     if (isHolding) {
-      // Safari cut out mid-hold due to silence detection — restart silently
-      debug('Still holding — restarting recognition');
+      // Safari silence detection fired while button still held — restart
       recordBtn.classList.add('recording');
+      recordBtn.classList.remove('finishing');
       recordHint.textContent = 'Listening…';
-      setTimeout(() => {
-        try { recognition.start(); } catch(e) {}
-      }, 100);
+      setTimeout(() => { try { recognition.start(); } catch(e) {} }, 80);
       return;
     }
 
-    // Button was released — process whatever we captured
-    recordBtn.classList.remove('recording');
-    if (finalTranscript.trim()) {
-      processTranscript(finalTranscript.trim());
-      finalTranscript = '';
+    // Button was released — process accumulated transcript
+    recordBtn.classList.remove('recording', 'finishing');
+    const text = finalTranscript.trim();
+    finalTranscript = '';
+    if (text) {
+      processTranscript(text);
     } else {
       setStatus('ready');
       recordHint.textContent = 'Hold to speak';
@@ -715,13 +706,18 @@ function initRecognition() {
 
   recognition.onerror = (e) => {
     isRecording = false;
-    recordBtn.classList.remove('recording');
     waveform.classList.remove('active');
+    if (e.error === 'aborted') return;
+    if (e.error === 'no-speech' && isHolding) {
+      setTimeout(() => { try { recognition.start(); } catch(err) {} }, 80);
+      return;
+    }
+    isHolding = false;
+    recordBtn.classList.remove('recording', 'finishing');
     setStatus('ready');
     recordHint.textContent = 'Hold to speak';
-    debug(`recognition error: ${e.error}`);
-    if (e.error !== 'no-speech' && e.error !== 'aborted') {
-      addEntry({ type: 'note', transcript: '', response: `Mic error: ${e.error}. Check browser permissions.` });
+    if (e.error !== 'no-speech') {
+      addEntry({ type: 'note', transcript: '', response: `Mic error: ${e.error}` });
     }
   };
 
@@ -729,27 +725,28 @@ function initRecognition() {
 }
 
 // ── Status helpers ───────────────────────────────────────────────────────────
-function setStatus(state) {
-  statusDot.className = 'status-dot ' + state;
+function setStatus(s) {
+  statusDot.className = 'status-dot ' + s;
 }
 
 // ── Record button: push to talk ───────────────────────────────────────────────
 let isTouchDevice = false;
 
 function startRecording() {
-  if (isRecording) return;
   if (!googleToken) {
     addEntry({ type: 'note', transcript: '', response: 'Sign in to Google first.' });
     return;
   }
   if (!recognition && !initRecognition()) return;
-  isHolding = true;
+  isHolding       = true;
   finalTranscript = '';
   liveTranscript.textContent = '';
   recordBtn.classList.add('recording');
   recordBtn.classList.remove('finishing');
   recordHint.textContent = 'Listening…';
-  try { recognition.start(); } catch(e) { /* already started */ }
+  if (!isRecording) {
+    try { recognition.start(); } catch(e) {}
+  }
 }
 
 function releaseRecording() {
@@ -758,55 +755,36 @@ function releaseRecording() {
   recordBtn.classList.remove('recording');
   recordBtn.classList.add('finishing');
   recordHint.textContent = 'Processing…';
-  // If still recording, stop now — onend will process the transcript
   if (isRecording) {
+    // onend will fire after stop and process the transcript
     try { recognition.stop(); } catch(e) {}
-  }
-  // If Safari already stopped (silence detection), process what we have
-  if (!isRecording && finalTranscript.trim()) {
-    processTranscript(finalTranscript.trim());
+  } else {
+    // Safari already stopped — process what we have immediately
+    recordBtn.classList.remove('finishing');
+    const text = finalTranscript.trim();
     finalTranscript = '';
+    if (text) {
+      processTranscript(text);
+    } else {
+      setStatus('ready');
+      recordHint.textContent = 'Hold to speak';
+      liveTranscript.textContent = '';
+    }
   }
 }
 
 // Touch (iOS primary)
-recordBtn.addEventListener('touchstart', (e) => {
-  e.preventDefault();
-  isTouchDevice = true;
-  isHolding = true;
-  startRecording();
-}, { passive: false });
-
-recordBtn.addEventListener('touchend', (e) => {
-  e.preventDefault();
-  releaseRecording();
-}, { passive: false });
-
-recordBtn.addEventListener('touchcancel', (e) => {
-  e.preventDefault();
-  releaseRecording();
-}, { passive: false });
+recordBtn.addEventListener('touchstart',  (e) => { e.preventDefault(); isTouchDevice = true; startRecording();  }, { passive: false });
+recordBtn.addEventListener('touchend',    (e) => { e.preventDefault(); releaseRecording(); }, { passive: false });
+recordBtn.addEventListener('touchcancel', (e) => { e.preventDefault(); releaseRecording(); }, { passive: false });
 
 // Mouse (desktop only)
-recordBtn.addEventListener('mousedown', (e) => {
-  if (isTouchDevice) return;
-  isHolding = true;
-  startRecording();
-});
-
-recordBtn.addEventListener('mouseup', (e) => {
-  if (isTouchDevice) return;
-  releaseRecording();
-});
-
-recordBtn.addEventListener('mouseleave', (e) => {
-  if (isTouchDevice) return;
-  releaseRecording();
-});
+recordBtn.addEventListener('mousedown',  () => { if (!isTouchDevice) startRecording();  });
+recordBtn.addEventListener('mouseup',    () => { if (!isTouchDevice) releaseRecording(); });
+recordBtn.addEventListener('mouseleave', () => { if (!isTouchDevice) releaseRecording(); });
 
 // ── Process transcript ───────────────────────────────────────────────────────
 async function processTranscript(text) {
-  debug(`processTranscript called: "${text}"`);
   setStatus('thinking');
   recordBtn.classList.add('thinking');
   recordHint.textContent = 'Thinking…';
@@ -814,35 +792,27 @@ async function processTranscript(text) {
 
   try {
     if (!googleToken) {
-      debug('No googleToken — aborting');
       addEntry({ type: 'note', transcript: text, response: 'Not signed in to Google. Tap Sign in to connect.' });
       return;
     }
 
-    debug(`googleToken present. Calling Worker…`);
     const messages = buildMessages(text);
     let result;
-
     try {
       result = await callClaude(messages);
-      debug(`Worker response: ${JSON.stringify(result)}`);
     } catch(workerErr) {
-      debug(`Worker threw: ${workerErr.message}`);
       addEntry({ type: 'note', transcript: text, response: `Worker error: ${workerErr.message}` });
       return;
     }
 
     if (!result || typeof result !== 'object') {
-      debug(`Bad result: ${JSON.stringify(result)}`);
       addEntry({ type: 'note', transcript: text, response: `Unexpected response: ${JSON.stringify(result)}` });
       return;
     }
 
-    debug(`Calling handleResult with type: ${result.type}`);
     await handleResult(text, result);
 
   } catch(err) {
-    debug(`Outer catch: ${err.message}`);
     addEntry({ type: 'note', transcript: text, response: `Error: ${err.message}` });
   } finally {
     setStatus(googleToken ? 'ready' : '');
@@ -886,7 +856,6 @@ async function callClaude(messages) {
 
 // ── Handle result ────────────────────────────────────────────────────────────
 async function handleResult(transcript, result) {
-  debug(`handleResult: type=${result.type} googleToken=${!!googleToken}`);
   setStatus('ready');
 
   if (!googleToken) {
@@ -895,9 +864,7 @@ async function handleResult(transcript, result) {
   }
 
   try {
-    debug('Loading tracker state from Drive…');
     const state = await loadTrackerState();
-    debug(`Tracker state loaded: engagements=${state?.engagements?.length} tasks=${state?.tasks?.length}`);
     if (!state) {
       addEntry({ type: 'note', transcript, response: 'Could not load tracker state from Drive.' });
       return;
@@ -1113,7 +1080,6 @@ function hideFeedEmpty() {
 }
 
 function addEntry({ type, transcript, response }) {
-  debug(`addEntry called: type=${type} response="${response}"`);
   hideFeedEmpty();
   const el = document.createElement('div');
   el.className = 'entry';

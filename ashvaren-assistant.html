@@ -684,12 +684,26 @@ function initRecognition() {
 
   recognition.onend = () => {
     isRecording = false;
-    recordBtn.classList.remove('recording');
     recordBtn.classList.remove('finishing');
     waveform.classList.remove('active');
-    debug(`onend fired. finalTranscript: "${finalTranscript}"`);
+    debug(`onend fired. isHolding=${isHolding} finalTranscript="${finalTranscript}"`);
+
+    if (isHolding) {
+      // Safari cut out mid-hold due to silence detection — restart silently
+      debug('Still holding — restarting recognition');
+      recordBtn.classList.add('recording');
+      recordHint.textContent = 'Listening…';
+      setTimeout(() => {
+        try { recognition.start(); } catch(e) {}
+      }, 100);
+      return;
+    }
+
+    // Button was released — process whatever we captured
+    recordBtn.classList.remove('recording');
     if (finalTranscript.trim()) {
       processTranscript(finalTranscript.trim());
+      finalTranscript = '';
     } else {
       setStatus('ready');
       recordHint.textContent = 'Hold to speak';
@@ -718,10 +732,8 @@ function setStatus(state) {
 }
 
 // ── Record button: push to talk ───────────────────────────────────────────────
-// Stop recognition immediately on release. Process in onend once transcript
-// is finalised. This makes the button the sole control over recording length.
-let isTouchDevice  = false;
-let releaseTimeout = null;
+let isTouchDevice   = false;
+let isHolding       = false; // true while finger/mouse is down
 
 function startRecording() {
   if (isRecording) return;
@@ -733,23 +745,33 @@ function startRecording() {
   finalTranscript = '';
   liveTranscript.textContent = '';
   recordBtn.classList.add('recording');
+  recordBtn.classList.remove('finishing');
   recordHint.textContent = 'Listening…';
   try { recognition.start(); } catch(e) { /* already started */ }
 }
 
 function releaseRecording() {
-  if (!isRecording) return;
-  // Stop immediately — onend will fire shortly after and process the transcript
+  if (!isHolding) return;
+  isHolding = false;
   recordBtn.classList.remove('recording');
   recordBtn.classList.add('finishing');
   recordHint.textContent = 'Processing…';
-  try { recognition.stop(); } catch(e) {}
+  // If still recording, stop now — onend will process the transcript
+  if (isRecording) {
+    try { recognition.stop(); } catch(e) {}
+  }
+  // If Safari already stopped (silence detection), process what we have
+  if (!isRecording && finalTranscript.trim()) {
+    processTranscript(finalTranscript.trim());
+    finalTranscript = '';
+  }
 }
 
 // Touch (iOS primary)
 recordBtn.addEventListener('touchstart', (e) => {
   e.preventDefault();
   isTouchDevice = true;
+  isHolding = true;
   startRecording();
 }, { passive: false });
 
@@ -766,6 +788,7 @@ recordBtn.addEventListener('touchcancel', (e) => {
 // Mouse (desktop only)
 recordBtn.addEventListener('mousedown', (e) => {
   if (isTouchDevice) return;
+  isHolding = true;
   startRecording();
 });
 

@@ -92,6 +92,31 @@
     margin: 0 2px;
   }
 
+  .tracker-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    text-decoration: none;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    position: absolute;
+    left: 0;
+  }
+
+  .tracker-link:hover {
+    color: var(--accent-hi);
+    border-color: var(--accent);
+    background: var(--accent-lo);
+  }
+
   .tagline {
     font-family: var(--mono);
     font-size: 9.5px;
@@ -530,6 +555,10 @@
   <header class="header">
     <div class="header-row">
       <div class="logo">Ashvaren</div>
+      <a class="tracker-link" href="https://ashvaren.github.io/work-tracker/" target="_blank" title="Open Work Tracker">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+        Tracker
+      </a>
       <div class="status-dot" id="statusDot"></div>
     </div>
     <div class="tagline">Clarity <span>·</span> Structure <span>·</span> Growth</div>
@@ -672,13 +701,22 @@ function setStatus(state) {
   statusDot.className = 'status-dot ' + state;
 }
 
-// ── Record button: hold to record ────────────────────────────────────────────
+// ── Record button: push to talk ───────────────────────────────────────────────
+// Single source of truth for recording state.
+// Touch events handle iOS. Mouse events handle desktop only when no touch.
+let isTouchDevice = false;
+
 function startRecording() {
   if (isRecording) return;
+  if (!googleToken) {
+    addEntry({ type: 'note', transcript: '', response: 'Sign in to Google first.' });
+    return;
+  }
   if (!recognition && !initRecognition()) return;
   finalTranscript = '';
   liveTranscript.textContent = '';
   recordBtn.classList.add('recording');
+  recordHint.textContent = 'Listening…';
   try { recognition.start(); } catch(e) { /* already started */ }
 }
 
@@ -688,14 +726,38 @@ function stopRecording() {
   recordBtn.classList.remove('recording');
 }
 
-// Touch events (mobile primary)
-recordBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); }, { passive: false });
-recordBtn.addEventListener('touchend',   (e) => { e.preventDefault(); stopRecording();  }, { passive: false });
+// Touch (iOS primary) — preventDefault stops the subsequent mouse events firing
+recordBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  isTouchDevice = true;
+  startRecording();
+}, { passive: false });
 
-// Mouse events (desktop fallback)
-recordBtn.addEventListener('mousedown', startRecording);
-recordBtn.addEventListener('mouseup',   stopRecording);
-recordBtn.addEventListener('mouseleave', stopRecording);
+recordBtn.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  stopRecording();
+}, { passive: false });
+
+recordBtn.addEventListener('touchcancel', (e) => {
+  e.preventDefault();
+  stopRecording();
+}, { passive: false });
+
+// Mouse (desktop only — skipped if touch was used)
+recordBtn.addEventListener('mousedown', (e) => {
+  if (isTouchDevice) return;
+  startRecording();
+});
+
+recordBtn.addEventListener('mouseup', (e) => {
+  if (isTouchDevice) return;
+  stopRecording();
+});
+
+recordBtn.addEventListener('mouseleave', (e) => {
+  if (isTouchDevice) return;
+  stopRecording();
+});
 
 // ── Process transcript ───────────────────────────────────────────────────────
 async function processTranscript(text) {

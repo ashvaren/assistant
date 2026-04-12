@@ -643,8 +643,9 @@ const deepClose      = document.getElementById('deepClose');
 
 // ── Speech Recognition ───────────────────────────────────────────────────────
 // Safari on iOS always fires onend after silence regardless of continuous mode.
-// We work around this by restarting automatically while isHolding is true,
-// accumulating the transcript across restarts until the button is released.
+// We work around this by restarting immediately while isHolding is true,
+// accumulating the transcript across restarts. We also preserve the last
+// interim result so words spoken at the moment of cutoff are not lost.
 
 function initRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -655,12 +656,15 @@ function initRecognition() {
   }
 
   recognition = new SR();
-  recognition.continuous     = false; // Safari ignores true — we restart manually
+  recognition.continuous     = false;
   recognition.interimResults = true;
   recognition.lang           = 'en-GB';
 
+  let lastInterim = ''; // preserve across restarts
+
   recognition.onstart = () => {
     isRecording = true;
+    lastInterim = '';
     setStatus('active');
     waveform.classList.add('active');
     if (isHolding) recordHint.textContent = 'Listening…';
@@ -671,10 +675,12 @@ function initRecognition() {
     for (let i = e.resultIndex; i < e.results.length; i++) {
       if (e.results[i].isFinal) {
         finalTranscript += (finalTranscript ? ' ' : '') + e.results[i][0].transcript.trim();
+        lastInterim = '';
       } else {
         interim += e.results[i][0].transcript;
       }
     }
+    lastInterim = interim;
     liveTranscript.textContent = (finalTranscript + (interim ? ' ' + interim : '')).trim();
   };
 
@@ -682,16 +688,22 @@ function initRecognition() {
     isRecording = false;
     waveform.classList.remove('active');
 
+    // If there was interim text that never finalised, fold it in
+    if (lastInterim.trim()) {
+      finalTranscript += (finalTranscript ? ' ' : '') + lastInterim.trim();
+      lastInterim = '';
+    }
+
     if (isHolding) {
-      // Safari silence detection fired while button still held — restart
+      // Safari silence detection fired — restart immediately, no delay
       recordBtn.classList.add('recording');
       recordBtn.classList.remove('finishing');
       recordHint.textContent = 'Listening…';
-      setTimeout(() => { try { recognition.start(); } catch(e) {} }, 80);
+      try { recognition.start(); } catch(e) {}
       return;
     }
 
-    // Button was released — process accumulated transcript
+    // Button released — process accumulated transcript
     recordBtn.classList.remove('recording', 'finishing');
     const text = finalTranscript.trim();
     finalTranscript = '';
@@ -709,7 +721,7 @@ function initRecognition() {
     waveform.classList.remove('active');
     if (e.error === 'aborted') return;
     if (e.error === 'no-speech' && isHolding) {
-      setTimeout(() => { try { recognition.start(); } catch(err) {} }, 80);
+      try { recognition.start(); } catch(err) {}
       return;
     }
     isHolding = false;

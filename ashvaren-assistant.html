@@ -764,17 +764,36 @@ async function processTranscript(text) {
   setStatus('thinking');
   recordBtn.classList.add('thinking');
   recordHint.textContent = 'Thinking…';
-
   hideFeedEmpty();
 
   try {
+    // Guard: must be signed in
+    if (!googleToken) {
+      addEntry({ type: 'note', transcript: text, response: 'Not signed in to Google. Tap Sign in to connect.' });
+      return;
+    }
+
     const messages = buildMessages(text);
-    const result   = await callClaude(messages);
-    handleResult(text, result);
+    let result;
+
+    try {
+      result = await callClaude(messages);
+    } catch(workerErr) {
+      addEntry({ type: 'note', transcript: text, response: `Worker error: ${workerErr.message}` });
+      return;
+    }
+
+    if (!result || typeof result !== 'object') {
+      addEntry({ type: 'note', transcript: text, response: `Unexpected response from Worker: ${JSON.stringify(result)}` });
+      return;
+    }
+
+    await handleResult(text, result);
+
   } catch(err) {
     addEntry({ type: 'note', transcript: text, response: `Error: ${err.message}` });
-    setStatus('ready');
   } finally {
+    setStatus(googleToken ? 'ready' : '');
     recordBtn.classList.remove('thinking');
     recordHint.textContent = 'Hold to speak';
     liveTranscript.textContent = '';

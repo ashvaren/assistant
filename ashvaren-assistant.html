@@ -457,10 +457,12 @@
     100% { inset: -22px; opacity: 0; }
   }
 
-  .record-btn.thinking {
+  .record-btn.finishing {
     border-color: var(--accent-hi);
     box-shadow: 0 0 0 2px var(--accent-lo), 0 4px 24px rgba(0,0,0,0.4);
   }
+
+  .record-btn.finishing .mic-icon { color: var(--accent-hi); }
 
   .mic-icon {
     width: 26px;
@@ -683,6 +685,7 @@ function initRecognition() {
   recognition.onend = () => {
     isRecording = false;
     recordBtn.classList.remove('recording');
+    recordBtn.classList.remove('finishing');
     waveform.classList.remove('active');
     debug(`onend fired. finalTranscript: "${finalTranscript}"`);
     if (finalTranscript.trim()) {
@@ -715,9 +718,10 @@ function setStatus(state) {
 }
 
 // ── Record button: push to talk ───────────────────────────────────────────────
-// Single source of truth for recording state.
-// Touch events handle iOS. Mouse events handle desktop only when no touch.
-let isTouchDevice = false;
+// Stop recognition immediately on release. Process in onend once transcript
+// is finalised. This makes the button the sole control over recording length.
+let isTouchDevice  = false;
+let releaseTimeout = null;
 
 function startRecording() {
   if (isRecording) return;
@@ -733,13 +737,16 @@ function startRecording() {
   try { recognition.start(); } catch(e) { /* already started */ }
 }
 
-function stopRecording() {
+function releaseRecording() {
   if (!isRecording) return;
-  try { recognition.stop(); } catch(e) {}
+  // Stop immediately — onend will fire shortly after and process the transcript
   recordBtn.classList.remove('recording');
+  recordBtn.classList.add('finishing');
+  recordHint.textContent = 'Processing…';
+  try { recognition.stop(); } catch(e) {}
 }
 
-// Touch (iOS primary) — preventDefault stops the subsequent mouse events firing
+// Touch (iOS primary)
 recordBtn.addEventListener('touchstart', (e) => {
   e.preventDefault();
   isTouchDevice = true;
@@ -748,15 +755,15 @@ recordBtn.addEventListener('touchstart', (e) => {
 
 recordBtn.addEventListener('touchend', (e) => {
   e.preventDefault();
-  stopRecording();
+  releaseRecording();
 }, { passive: false });
 
 recordBtn.addEventListener('touchcancel', (e) => {
   e.preventDefault();
-  stopRecording();
+  releaseRecording();
 }, { passive: false });
 
-// Mouse (desktop only — skipped if touch was used)
+// Mouse (desktop only)
 recordBtn.addEventListener('mousedown', (e) => {
   if (isTouchDevice) return;
   startRecording();
@@ -764,12 +771,12 @@ recordBtn.addEventListener('mousedown', (e) => {
 
 recordBtn.addEventListener('mouseup', (e) => {
   if (isTouchDevice) return;
-  stopRecording();
+  releaseRecording();
 });
 
 recordBtn.addEventListener('mouseleave', (e) => {
   if (isTouchDevice) return;
-  stopRecording();
+  releaseRecording();
 });
 
 // ── Process transcript ───────────────────────────────────────────────────────
@@ -854,6 +861,7 @@ async function callClaude(messages) {
 
 // ── Handle result ────────────────────────────────────────────────────────────
 async function handleResult(transcript, result) {
+  debug(`handleResult: type=${result.type} googleToken=${!!googleToken}`);
   setStatus('ready');
 
   if (!googleToken) {
@@ -862,8 +870,9 @@ async function handleResult(transcript, result) {
   }
 
   try {
-    // Load current tracker state
+    debug('Loading tracker state from Drive…');
     const state = await loadTrackerState();
+    debug(`Tracker state loaded: engagements=${state?.engagements?.length} tasks=${state?.tasks?.length}`);
     if (!state) {
       addEntry({ type: 'note', transcript, response: 'Could not load tracker state from Drive.' });
       return;
@@ -1079,6 +1088,8 @@ function hideFeedEmpty() {
 }
 
 function addEntry({ type, transcript, response }) {
+  debug(`addEntry called: type=${type} response="${response}"`);
+  hideFeedEmpty();
   const el = document.createElement('div');
   el.className = 'entry';
   el.innerHTML = `

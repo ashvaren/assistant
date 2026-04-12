@@ -634,6 +634,7 @@ function debug(msg) {
 // ── State ───────────────────────────────────────────────────────────────────
 let recognition     = null;
 let isRecording     = false;
+let isHolding       = false;
 let finalTranscript = '';
 let deepMode        = { active: false, context: [], pendingAction: null };
 
@@ -660,7 +661,7 @@ function initRecognition() {
     return false;
   }
   recognition = new SR();
-  recognition.continuous      = false;
+  recognition.continuous      = true;
   recognition.interimResults  = true;
   recognition.lang            = 'en-GB';
   recognition.maxAlternatives = 1;
@@ -674,12 +675,13 @@ function initRecognition() {
 
   recognition.onresult = (e) => {
     let interim = '';
-    finalTranscript = '';
+    let sessionFinal = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) finalTranscript += e.results[i][0].transcript;
+      if (e.results[i].isFinal) sessionFinal += e.results[i][0].transcript;
       else interim += e.results[i][0].transcript;
     }
-    liveTranscript.textContent = finalTranscript || interim;
+    if (sessionFinal) finalTranscript += ' ' + sessionFinal;
+    liveTranscript.textContent = (finalTranscript + ' ' + interim).trim();
   };
 
   recognition.onend = () => {
@@ -732,8 +734,7 @@ function setStatus(state) {
 }
 
 // ── Record button: push to talk ───────────────────────────────────────────────
-let isTouchDevice   = false;
-let isHolding       = false; // true while finger/mouse is down
+let isTouchDevice = false;
 
 function startRecording() {
   if (isRecording) return;
@@ -742,6 +743,7 @@ function startRecording() {
     return;
   }
   if (!recognition && !initRecognition()) return;
+  isHolding = true;
   finalTranscript = '';
   liveTranscript.textContent = '';
   recordBtn.classList.add('recording');
